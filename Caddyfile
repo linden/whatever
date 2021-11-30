@@ -1,0 +1,12 @@
+{
+    auto_https off
+}
+
+http://www.whateverorigin.org:8000, http://whateverorigin.org:8000, http://whatever.fly.dev:8000 {
+	reverse_proxy /get localhost:8080  {
+		header_up X-IP Fly-Client-Ip
+	}
+	
+	root * ./static
+	file_server
+}
