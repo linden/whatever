@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/natefinch/lumberjack"
@@ -29,7 +30,7 @@ type Response struct {
 var client *http.Client
 var logger *log.Logger
 
-var limiter = make(map[string]int)
+var limiter sync.Map
 
 func init() {
 	client = &http.Client{}
@@ -111,16 +112,16 @@ func tunnel(URL string, before *http.Request) Response {
 }
 
 func check(address string) bool {
-	if value, ok := limiter[address]; ok {
-		limiter[address] = value + 1
+	var value int
 
-		if value > RATE_LIMIT {
-			logger.Println(address, "was rate limited")
+	count, _ := limiter.LoadOrStore(address, &value)
 
-			return false
-		}
-	} else {
-		limiter[address] = 1
+	*count.(*int) += 1
+
+	if value > RATE_LIMIT {
+		logger.Println(address, "was rate limited")
+
+		return false
 	}
 
 	return true
@@ -160,7 +161,7 @@ func main() {
 		for {
 			time.Sleep(1 * time.Minute)
 
-			limiter = make(map[string]int)
+			limiter = sync.Map{}
 		}
 	}()
 
