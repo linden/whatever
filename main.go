@@ -142,7 +142,7 @@ func check(address string) bool {
 
 	*count.(*int) += 1
 
-	return value < RATE_LIMIT
+	return *count.(*int) < RATE_LIMIT
 }
 
 func get(writer http.ResponseWriter, request *http.Request) {
