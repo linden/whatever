@@ -2,12 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
@@ -31,17 +30,30 @@ var client *http.Client
 var logger *log.Logger
 
 var limiter sync.Map
+var nonce = int64(0)
+var dev bool
 
 func init() {
 	client = &http.Client{}
 
-	reader := io.MultiWriter(os.Stderr, &lumberjack.Logger{
-		Filename: "./main.log",
-		MaxSize:  250,
-		Compress: true,
-	})
+	flag.BoolVar(&dev, "dev", false, "dev mode")
+	flag.Parse()
 
-	logger = log.New(reader, "", log.Ldate|log.Ltime|log.Lshortfile)
+	path := "/logs/log"
+
+	if dev == true {
+		path = "./log"
+	}
+
+	logger = log.New(&lumberjack.Logger{
+		Filename: path,
+		MaxSize:  5,
+		Compress: true,
+	}, "", log.Ldate|log.Ltime|log.Lshortfile)
+}
+
+func FormatRequest(request *http.Request) string {
+	return fmt.Sprintf("[%v %v %v %v]", request.Header.Get("Fly-Client-Ip"), request.Header, request.Host, request.URL)
 }
 
 func CORS(next http.Handler) http.Handler {
@@ -55,13 +67,25 @@ func CORS(next http.Handler) http.Handler {
 	})
 }
 
+func view(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		logger.Println("view", FormatRequest(request))
+
+		next.ServeHTTP(writer, request)
+	})
+}
+
 func tunnel(URL string, before *http.Request) Response {
-	logger.Println("request", URL, before.Header)
+	nonce += 1
+
+	id := nonce
+
+	logger.Println("request", id, URL, FormatRequest(before))
 
 	request, err := http.NewRequest("GET", URL, nil)
 
 	if err != nil {
-		logger.Println(URL, err)
+		logger.Println("invalid request", id, err)
 
 		return Response{
 			Status: Status{
@@ -74,7 +98,7 @@ func tunnel(URL string, before *http.Request) Response {
 	response, err := client.Do(request)
 
 	if err != nil {
-		logger.Println(URL, err)
+		logger.Println("request failed", id, err)
 
 		return Response{
 			Status: Status{
@@ -87,7 +111,7 @@ func tunnel(URL string, before *http.Request) Response {
 	plain, err := ioutil.ReadAll(response.Body)
 
 	if err != nil {
-		logger.Println(URL, err)
+		logger.Println("failed to read body", id, err)
 
 		return Response{
 			Status: Status{
@@ -106,7 +130,7 @@ func tunnel(URL string, before *http.Request) Response {
 		},
 	}
 
-	logger.Printf("response %+v\n", result.Status)
+	logger.Printf("response %d %+v\n", id, result.Status)
 
 	return result
 }
@@ -118,19 +142,15 @@ func check(address string) bool {
 
 	*count.(*int) += 1
 
-	if value > RATE_LIMIT {
-		logger.Println(address, "was rate limited")
-
-		return false
-	}
-
-	return true
+	return value < RATE_LIMIT
 }
 
 func get(writer http.ResponseWriter, request *http.Request) {
 	URL := request.URL.Query().Get("url")
 
 	if URL == "" {
+		logger.Println("failed to find parameter", FormatRequest(request))
+
 		writer.Write([]byte("URL parameter is required."))
 		return
 	}
@@ -140,6 +160,8 @@ func get(writer http.ResponseWriter, request *http.Request) {
 	allowed := check(request.Header.Get("Fly-Client-Ip"))
 
 	if allowed == false {
+		logger.Println("rate limited", FormatRequest)
+
 		writer.Write([]byte(fmt.Sprintf("rate limited: you have a max of %d request per second", RATE_LIMIT)))
 		return
 	}
@@ -166,7 +188,7 @@ func main() {
 	}()
 
 	http.Handle("/get", CORS(http.HandlerFunc(get)))
-	http.Handle("/", http.FileServer(http.Dir("./static")))
+	http.Handle("/", view(http.FileServer(http.Dir("./static"))))
 
-	http.ListenAndServe(":8080", nil)
+	panic(http.ListenAndServe(":8080", nil))
 }
