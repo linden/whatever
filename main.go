@@ -2,11 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/natefinch/lumberjack"
 )
 
 const RATE_LIMIT = 600
@@ -29,7 +33,14 @@ var limiter = make(map[string]int)
 
 func init() {
 	client = &http.Client{}
-	logger = log.New(os.Stderr, "", log.Ldate|log.Ltime|log.Lshortfile)
+
+	reader := io.MultiWriter(os.Stderr, &lumberjack.Logger{
+		Filename: "./main.log",
+		MaxSize:  250,
+		Compress: true,
+	})
+
+	logger = log.New(reader, "", log.Ldate|log.Ltime|log.Lshortfile)
 }
 
 func CORS(next http.Handler) http.Handler {
@@ -125,10 +136,10 @@ func get(writer http.ResponseWriter, request *http.Request) {
 
 	callback := request.URL.Query().Get("callback")
 
-	allowed := check(request.Header.Get("X-IP"))
+	allowed := check(request.Header.Get("Fly-Client-Ip"))
 
 	if allowed == false {
-		writer.Write([]byte("rate limited: you have a max of 150 request per second"))
+		writer.Write([]byte(fmt.Sprintf("rate limited: you have a max of %d request per second", RATE_LIMIT)))
 		return
 	}
 
@@ -154,6 +165,7 @@ func main() {
 	}()
 
 	http.Handle("/get", CORS(http.HandlerFunc(get)))
+	http.Handle("/", http.FileServer(http.Dir("./static")))
 
 	http.ListenAndServe(":8080", nil)
 }

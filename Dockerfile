@@ -6,9 +6,6 @@ WORKDIR /app
 
 COPY . .
 
-RUN go build ./src/main.go
+RUN go build main.go
 
-RUN apk add --no-cache caddy
-RUN apk add --no-cache bash
-
-ENTRYPOINT ["bash", "./run.sh"]
+ENTRYPOINT ["./main"]
