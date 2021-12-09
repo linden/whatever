@@ -31,6 +31,8 @@ var limiter sync.Map
 
 var getLogger *libhoney.Client
 
+var bypass = "Fly-Client-Ip"
+
 func init() {
 	var err error
 
@@ -40,6 +42,12 @@ func init() {
 
 	if key == "" {
 		panic("failed to find honeycomb write key")
+	}
+
+	bypassKey := os.Getenv("BYPASS")
+
+	if bypassKey != "" {
+		bypass = bypassKey
 	}
 
 	getLogger, err = libhoney.NewClient(libhoney.ClientConfig{
@@ -154,7 +162,7 @@ func get(writer http.ResponseWriter, request *http.Request) {
 	}(event)
 
 	URL := request.URL.Query().Get("url")
-	IP := request.Header.Get("Fly-Client-Ip")
+	IP := request.Header.Get(bypass)
 
 	event.AddField("url", URL)
 	event.AddField("ip", IP)
