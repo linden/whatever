@@ -2,15 +2,15 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/natefinch/lumberjack"
+	"github.com/honeycombio/libhoney-go"
 )
 
 const RATE_LIMIT = 600
@@ -27,33 +27,37 @@ type Response struct {
 }
 
 var client *http.Client
-var logger *log.Logger
-
 var limiter sync.Map
-var nonce = int64(0)
-var dev bool
+
+var getLogger *libhoney.Client
 
 func init() {
+	var err error
+
 	client = &http.Client{}
 
-	flag.BoolVar(&dev, "dev", false, "dev mode")
-	flag.Parse()
+	key := os.Getenv("HONEY")
 
-	path := "/logs/log"
-
-	if dev == true {
-		path = "./log"
+	if key == "" {
+		panic("failed to find honeycomb write key")
 	}
 
-	logger = log.New(&lumberjack.Logger{
-		Filename: path,
-		MaxSize:  5,
-		Compress: true,
-	}, "", log.Ldate|log.Ltime|log.Lshortfile)
-}
+	getLogger, err = libhoney.NewClient(libhoney.ClientConfig{
+		APIKey:  key,
+		Dataset: "whatever-tunnel",
+	})
 
-func FormatRequest(request *http.Request) string {
-	return fmt.Sprintf("[%v %v %v %v]", request.Header.Get("Fly-Client-Ip"), request.Header, request.Host, request.URL)
+	if err != nil {
+		panic(err)
+	}
+
+	commit, err := ioutil.ReadFile(".git/refs/heads/main")
+
+	if err != nil {
+		panic(err)
+	}
+
+	getLogger.AddField("git", strings.TrimSpace(string(commit)))
 }
 
 func CORS(next http.Handler) http.Handler {
@@ -67,25 +71,14 @@ func CORS(next http.Handler) http.Handler {
 	})
 }
 
-func view(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		logger.Println("view", FormatRequest(request))
-
-		next.ServeHTTP(writer, request)
-	})
-}
-
-func tunnel(URL string, before *http.Request) Response {
-	nonce += 1
-
-	id := nonce
-
-	logger.Println("request", id, URL, FormatRequest(before))
+func tunnel(URL string, event *libhoney.Event) Response {
+	event.AddField("origin", URL)
 
 	request, err := http.NewRequest("GET", URL, nil)
 
 	if err != nil {
-		logger.Println("invalid request", id, err)
+		event.AddField("error", "invalid request")
+		event.AddField("error_raw", err)
 
 		return Response{
 			Status: Status{
@@ -98,7 +91,8 @@ func tunnel(URL string, before *http.Request) Response {
 	response, err := client.Do(request)
 
 	if err != nil {
-		logger.Println("request failed", id, err)
+		event.AddField("error", "request failed")
+		event.AddField("error_raw", err)
 
 		return Response{
 			Status: Status{
@@ -111,7 +105,8 @@ func tunnel(URL string, before *http.Request) Response {
 	plain, err := ioutil.ReadAll(response.Body)
 
 	if err != nil {
-		logger.Println("failed to read body", id, err)
+		event.AddField("error", "failed to read body")
+		event.AddField("error_raw", err)
 
 		return Response{
 			Status: Status{
@@ -130,7 +125,10 @@ func tunnel(URL string, before *http.Request) Response {
 		},
 	}
 
-	logger.Printf("response %d %+v\n", id, result.Status)
+	event.AddField("content", result.Content)
+	event.AddField("status_url", result.Status.URL)
+	event.AddField("status_type", result.Status.Type)
+	event.AddField("status_code", result.Status.Code)
 
 	return result
 }
@@ -146,10 +144,23 @@ func check(address string) bool {
 }
 
 func get(writer http.ResponseWriter, request *http.Request) {
+	event := getLogger.NewEvent()
+	defer event.Send()
+
+	start := time.Now()
+
+	defer func(event *libhoney.Event) {
+		event.AddField("duration", time.Since(start).Milliseconds())
+	}(event)
+
 	URL := request.URL.Query().Get("url")
+	IP := request.Header.Get("Fly-Client-Ip")
+
+	event.AddField("url", URL)
+	event.AddField("ip", IP)
 
 	if URL == "" {
-		logger.Println("failed to find parameter", FormatRequest(request))
+		event.AddField("error", "failed to find parameter")
 
 		writer.Write([]byte("URL parameter is required."))
 		return
@@ -157,18 +168,20 @@ func get(writer http.ResponseWriter, request *http.Request) {
 
 	callback := request.URL.Query().Get("callback")
 
-	allowed := check(request.Header.Get("Fly-Client-Ip"))
+	allowed := check(IP)
 
 	if allowed == false {
-		logger.Println("rate limited", FormatRequest)
+		event.AddField("error", "rate limited")
 
 		writer.Write([]byte(fmt.Sprintf("rate limited: you have a max of %d request per second", RATE_LIMIT)))
 		return
 	}
 
-	body, _ := json.Marshal(tunnel(URL, request))
+	body, _ := json.Marshal(tunnel(URL, event))
 
 	if callback != "" {
+		event.AddField("callback", callback)
+
 		writer.Header().Set("Content-Type", "application/x-javascript")
 		body = []byte(callback + "(" + string(body) + ")")
 	} else {
@@ -188,7 +201,7 @@ func main() {
 	}()
 
 	http.Handle("/get", CORS(http.HandlerFunc(get)))
-	http.Handle("/", view(http.FileServer(http.Dir("./static"))))
+	http.Handle("/", http.FileServer(http.Dir("./static")))
 
 	panic(http.ListenAndServe(":8080", nil))
 }
